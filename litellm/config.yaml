@@ -1,0 +1,38 @@
+# LiteLLM proxy configuration.
+#
+# The Claude Agent SDK (Claude Code under the hood) speaks the Anthropic
+# Messages API. This proxy exposes an Anthropic-compatible `/v1/messages`
+# endpoint and routes each request to a real backend by MODEL NAME:
+#
+#   model "lenny-cloud" -> OpenAI  (LLM_PROVIDER=cloud)
+#   model "lenny-local" -> Ollama  (LLM_PROVIDER=local)
+#
+# The API picks which model name to send based on LLM_PROVIDER, so switching
+# providers is a single env var — no application code changes.
+#
+# Docs for the pattern: https://docs.litellm.ai/docs/tutorials/claude_non_anthropic_models
+
+model_list:
+  - model_name: lenny-cloud
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+
+  - model_name: lenny-cloud-pro
+    litellm_params:
+      model: openai/gpt-4.1
+      api_key: os.environ/OPENAI_API_KEY
+
+  - model_name: lenny-local
+    litellm_params:
+      model: ollama_chat/llama3.1:8b
+      api_base: os.environ/OLLAMA_URL
+
+litellm_settings:
+  # Silently drop provider-specific params the target model doesn't support
+  # (e.g. Anthropic `thinking`/`top_k` reaching an OpenAI/Ollama model).
+  drop_params: true
+  request_timeout: 600
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

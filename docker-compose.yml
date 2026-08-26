@@ -1,0 +1,107 @@
+# One-command startup:  cp .env.example .env  &&  docker compose up --build
+# Then (once, to load the knowledge base):
+#   docker compose run --rm api python -m app.rag.ingest
+#
+# Services:
+#   db          Postgres 16 + pgvector (persistence AND vector store)
+#   ollama      local LLM + embedding server (mandatory demo path)
+#   ollama-pull one-shot: pulls llama3.1:8b + nomic-embed-text, then exits
+#   litellm     proxy exposing an Anthropic /v1/messages endpoint the Agent SDK targets
+#   api         FastAPI backend + Claude Agent SDK agent layer
+#   web         React/Vite SPA (built, served by nginx)
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-lenny}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lenny}
+      POSTGRES_DB: ${POSTGRES_DB:-lenny}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lenny} -d ${POSTGRES_DB:-lenny}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Best-effort: pull the demo models into the ollama server, then exit.
+  # First run downloads several GB; subsequent runs are instant (cached in volume).
+  ollama-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_started
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        echo 'Waiting for ollama...' &&
+        until ollama list >/dev/null 2>&1; do sleep 2; done &&
+        ollama pull ${OLLAMA_MODEL:-llama3.1:8b} &&
+        ollama pull ${EMBED_MODEL:-nomic-embed-text} &&
+        echo 'Models ready.'
+    restart: "no"
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    depends_on:
+      ollama:
+        condition: service_started
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-lenny-local-dev}
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
+
+  api:
+    build: ./backend
+    depends_on:
+      db:
+        condition: service_healthy
+      litellm:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      # Override host names for the compose network (beat any localhost defaults in .env)
+      DATABASE_URL: postgresql://${POSTGRES_USER:-lenny}:${POSTGRES_PASSWORD:-lenny}@db:5432/${POSTGRES_DB:-lenny}
+      OLLAMA_URL: http://ollama:11434
+      LITELLM_PROXY_URL: http://litellm:4000
+    ports:
+      - "8000:8000"
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: http://localhost:8000
+    depends_on:
+      - api
+    ports:
+      - "8080:80"
+
+volumes:
+  pgdata:
+  ollama:
